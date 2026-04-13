@@ -3,112 +3,119 @@ import json
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
-st.set_page_config(page_title="Conversor Alpheios ➔ Perseids", layout="wide")
+st.set_page_config(page_title="Conversor Alpheios ➔ Perseids V5", layout="wide")
 
-def extract_tokens_from_json(data_part):
+def get_tokens_safe(data_part):
     """
-    Extrai tokens especificamente da estrutura do Alpheios:
-    lang -> segments -> [lista] -> tokens -> [lista]
+    Busca os tokens navegando pela estrutura real: 
+    data -> origin/target -> segments -> lista -> tokens
     """
-    tokens_list = []
-    if "segments" in data_part:
-        for segment in data_part["segments"]:
-            if "tokens" in segment:
-                for token in segment["tokens"]:
-                    # Verifica se é um dicionário de token válido
-                    if isinstance(token, dict) and "id" in token and "word" in token:
-                        tokens_list.append(token)
-    return tokens_list
+    all_tokens = []
+    
+    # 1. Tenta acessar a lista de segmentos
+    segments = data_part.get('segments', [])
+    
+    # Caso segments não seja uma lista (raro, mas acontece em certas versões)
+    if isinstance(segments, dict):
+        segments = [segments]
+
+    for seg in segments:
+        tokens = seg.get('tokens', [])
+        if isinstance(tokens, list):
+            for t in tokens:
+                # Validamos se o token tem o formato mínimo esperado
+                if isinstance(t, dict) and 'id' in t and 'word' in t:
+                    all_tokens.append(t)
+    
+    return all_tokens
 
 def convert_to_xml(json_data):
-    # Criar raiz do XML
     root = ET.Element("aligned-text", xmlns="http://alpheios.net/namespaces/aligned-text")
     ET.SubElement(root, "language", lnum="L1", **{"xml:lang": "grc"})
     ET.SubElement(root, "language", lnum="L2", **{"xml:lang": "por"})
     
     sentence_node = ET.SubElement(root, "sentence", n="1")
-    id_map = {} # De ID Alpheios (ex: 1-0-1) para ID Perseids (ex: 1-1)
+    id_map = {}
 
-    # 1. Processar L1 (Origem) e L2 (Destino)
     def process_lang(lang_key, lnum):
         wds_node = ET.SubElement(sentence_node, "wds", lnum=lnum)
         lang_data = json_data.get(lang_key, {})
-        tokens = extract_tokens_from_json(lang_data)
+        
+        tokens = get_tokens_safe(lang_data)
         
         if not tokens:
+            st.warning(f"Aviso: Nenhuma palavra encontrada para {lang_key}.")
             return False
 
         for i, tok in enumerate(tokens, 1):
             xml_id = f"1-{i}"
-            id_map[tok["id"]] = xml_id
+            id_map[tok['id']] = xml_id
             
             w_node = ET.SubElement(wds_node, "w", n=xml_id)
             text_node = ET.SubElement(w_node, "text")
-            text_node.text = str(tok["word"])
+            text_node.text = str(tok['word'])
         return True
 
-    # Tenta processar as duas línguas
-    has_l1 = process_lang("origin", "L1")
-    has_l2 = process_lang("target", "L2")
+    # Processamento das duas línguas
+    success_l1 = process_lang('origin', 'L1')
+    success_l2 = process_lang('target', 'L2')
 
-    if not has_l1 or not has_l2:
+    if not success_l1 or not success_l2:
         return None
 
-    # 2. Mapear Alinhamentos
+    # Mapeamento de Alinhamentos
     align_refs = {}
-    for al in json_data.get("alignments", []):
-        actions = al.get("actions", {})
-        origins = actions.get("origin", [])
-        targets = actions.get("target", [])
+    for al in json_data.get('alignments', []):
+        actions = al.get('actions', {})
+        origins = actions.get('origin', [])
+        targets = actions.get('target', [])
         
         for o in origins:
             if o in id_map:
                 if o not in align_refs: align_refs[o] = []
-                # Adiciona todos os alinhamentos correspondentes
-                for t in targets:
-                    if t in id_map:
-                        align_refs[o].append(id_map[t])
-        
+                align_refs[o].extend([id_map[t] for t in targets if t in id_map])
         for t in targets:
             if t in id_map:
                 if t not in align_refs: align_refs[t] = []
-                for o in origins:
-                    if o in id_map:
-                        align_refs[t].append(id_map[o])
+                align_refs[t].extend([id_map[o] for o in origins if o in id_map])
 
-    # 3. Adicionar tags <refs> ao XML
+    # Inserção das tags <refs>
     for w_node in sentence_node.findall(".//w"):
-        xml_id = w_node.get("n")
-        # Encontra o ID original do JSON (ex: 1-0-5) que gerou este 1-1
-        original_json_id = [k for k, v in id_map.items() if v == xml_id]
-        
-        if original_json_id:
-            oid = original_json_id[0]
+        xml_id = w_node.get('n')
+        orig_json_ids = [k for k, v in id_map.items() if v == xml_id]
+        if orig_json_ids:
+            oid = orig_json_ids[0]
             if oid in align_refs:
-                # Remove duplicatas e ordena as referências
                 unique_refs = sorted(list(set(align_refs[oid])))
                 if unique_refs:
                     ET.SubElement(w_node, "refs", nrefs=" ".join(unique_refs))
 
-    # Formatar string XML
-    xml_str = ET.tostring(root, encoding="utf-8")
+    xml_str = ET.tostring(root, encoding='utf-8')
     return minidom.parseString(xml_str).toprettyxml(indent="    ")
 
-# --- Interface ---
-st.title("🏛️ Conversor Alpheios ➔ Perseids (V4)")
+# Interface
+st.title("🏛️ Conversor Alpheios ➔ Perseids (Versão de Diagnóstico)")
 
-file = st.file_uploader("Suba o JSON aqui", type="json")
+file = st.file_uploader("Suba o JSON", type="json")
 
 if file:
     try:
-        data = json.load(file)
-        xml_result = convert_to_xml(data)
+        content = json.load(file)
+        
+        # DEBUG: Mostra no Streamlit se as chaves existem
+        st.write("### Diagnóstico do Arquivo:")
+        st.write(f"- Chave 'origin' presente: {'origin' in content}")
+        st.write(f"- Chave 'target' presente: {'target' in content}")
+        st.write(f"- Chave 'alignments' presente: {'alignments' in content}")
+
+        xml_result = convert_to_xml(content)
         
         if xml_result:
-            st.success("Conversão realizada!")
+            st.success("XML gerado com sucesso!")
             st.code(xml_result, language="xml")
             st.download_button("Baixar XML", xml_result, file_name="alinhamento.xml")
         else:
-            st.error("Erro: Não foi possível extrair os textos. Verifique se o JSON contém 'origin' e 'target' com a estrutura de tokens correta.")
+            st.error("Erro: A estrutura de tokens dentro de 'segments' não foi encontrada.")
+            
     except Exception as e:
-        st.error(f"Erro no processamento: {e}")
+        st.error(f"Erro fatal: {e}")
