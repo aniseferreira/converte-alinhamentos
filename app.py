@@ -3,111 +3,103 @@ import json
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
-st.set_page_config(page_title="Conversor Alpheios Final", layout="wide")
+st.set_page_config(page_title="Conversor Alpheios ➔ Perseids", layout="wide")
 
-def coletar_tokens(obj):
-    """Varre o JSON recursivamente para achar todos os objetos que são tokens."""
-    tokens = []
-    if isinstance(obj, dict):
-        # Verifica se o dicionário atual é um token (tem palavra e ID)
-        if 'word' in obj and ('idWord' in obj or 'id' in obj):
-            tid = obj.get('idWord') or obj.get('id')
-            return [{'id': tid, 'word': obj['word']}]
-        # Se não for, continua mergulhando
-        for v in obj.values():
-            tokens.extend(coletar_tokens(v))
-    elif isinstance(obj, list):
-        for item in obj:
-            tokens.extend(coletar_tokens(item))
-    return tokens
+def extrair_tokens(data_section):
+    """Navega na estrutura exata do Alpheios para coletar palavras."""
+    tokens_list = []
+    # O Alpheios coloca os dados reais dentro de alignedText -> segments
+    aligned_text = data_section.get('alignedText', {})
+    segments = aligned_text.get('segments', [])
+    
+    for seg in segments:
+        for tok in seg.get('tokens', []):
+            # Nos seus arquivos, a chave é 'idWord'
+            tid = tok.get('idWord')
+            word = tok.get('word')
+            if tid and word is not None:
+                tokens_list.append({'id': tid, 'word': word})
+    return tokens_list
 
 def convert_to_xml(data):
-    # Setup básico do XML do Perseids
+    # Cabeçalho do XML Perseids
     root = ET.Element("aligned-text", xmlns="http://alpheios.net/namespaces/aligned-text")
     ET.SubElement(root, "language", lnum="L1", **{"xml:lang": "grc"})
     ET.SubElement(root, "language", lnum="L2", **{"xml:lang": "por"})
     sentence_node = ET.SubElement(root, "sentence", n="1")
     
-    id_map = {} # De '1-0-1' para '1-1'
+    id_map = {} # Traduz o ID do Alpheios (ex: 1-0-5) para o do Perseids (ex: 1-5)
 
-    # 1. Extração robusta de L1 e L2
-    # Procuramos especificamente dentro das seções de origem e destino
-    tokens_l1 = coletar_tokens(data.get('origin', {}))
-    tokens_l2 = coletar_tokens(data.get('target', {}))
+    # 1. Processar Grego (Origin) e Português (Target)
+    tokens_grc = extrair_tokens(data.get('origin', {}))
+    tokens_por = extrair_tokens(data.get('target', {}))
 
-    if not tokens_l1 or not tokens_l2:
+    if not tokens_grc or not tokens_por:
         return None
 
-    # Monta os nós de palavras para o Grego (L1)
+    # Montar nós de palavras Grego (L1)
     wds1 = ET.SubElement(sentence_node, "wds", lnum="L1")
-    for i, tok in enumerate(tokens_l1, 1):
+    for i, tok in enumerate(tokens_grc, 1):
         xml_id = f"1-{i}"
         id_map[tok['id']] = xml_id
         w = ET.SubElement(wds1, "w", n=xml_id)
         ET.SubElement(w, "text").text = str(tok['word'])
 
-    # Monta os nós de palavras para o Português (L2)
+    # Montar nós de palavras Português (L2)
     wds2 = ET.SubElement(sentence_node, "wds", lnum="L2")
-    for i, tok in enumerate(tokens_l2, 1):
+    for i, tok in enumerate(tokens_por, 1):
         xml_id = f"1-{i}"
         id_map[tok['id']] = xml_id
         w = ET.SubElement(wds2, "w", n=xml_id)
         ET.SubElement(w, "text").text = str(tok['word'])
 
-    # 2. Processar Alinhamentos
-    # Percorre a lista de alinhamentos que fica na raiz do JSON
+    # 2. Mapear os Alinhamentos (Refs)
+    # A seção 'alignments' fica na raiz do seu JSON
     alignments = data.get('alignments', [])
     for al in alignments:
-        actions = al.get('actions', {})
-        origins = actions.get('origin', [])
-        targets = actions.get('target', [])
+        act = al.get('actions', {})
+        orig_ids = act.get('origin', [])
+        targ_ids = act.get('target', [])
         
-        # Cria as conexões nrefs
-        for o_id in origins:
+        # Conecta Origem -> Destino
+        for o_id in orig_ids:
             if o_id in id_map:
-                xml_o = id_map[o_id]
-                # Localiza o nó <w> correspondente no XML
-                for node in sentence_node.findall(f".//w[@n='{xml_o}']"):
-                    refs = node.find('refs')
-                    if refs is None: refs = ET.SubElement(node, "refs", nrefs="")
-                    
-                    existentes = refs.get('nrefs').split()
-                    novos = [id_map[tid] for tid in targets if tid in id_map]
-                    refs.set('nrefs', " ".join(sorted(list(set(existentes + novos)))))
+                target_refs = [id_map[tid] for tid in targ_ids if tid in id_map]
+                if target_refs:
+                    # Busca o nó <w> correspondente no XML para injetar a ref
+                    for w in sentence_node.findall(f".//w[@n='{id_map[o_id]}']"):
+                        ref_node = w.find('refs')
+                        if ref_node is None: ref_node = ET.SubElement(w, "refs", nrefs="")
+                        existing = ref_node.get('nrefs').split()
+                        ref_node.set('nrefs', " ".join(sorted(list(set(existing + target_refs)))))
 
-        # Faz o mesmo para o lado do target
-        for t_id in targets:
+        # Conecta Destino -> Origem (Bidirecional)
+        for t_id in targ_ids:
             if t_id in id_map:
-                xml_t = id_map[t_id]
-                for node in sentence_node.findall(f".//w[@n='{xml_t}']"):
-                    refs = node.find('refs')
-                    if refs is None: refs = ET.SubElement(node, "refs", nrefs="")
-                    
-                    existentes = refs.get('nrefs').split()
-                    novos = [id_map[oid] for oid in origins if oid in id_map]
-                    refs.set('nrefs', " ".join(sorted(list(set(existentes + novos)))))
+                origin_refs = [id_map[oid] for oid in orig_ids if oid in id_map]
+                if origin_refs:
+                    for w in sentence_node.findall(f".//w[@n='{id_map[t_id]}']"):
+                        ref_node = w.find('refs')
+                        if ref_node is None: ref_node = ET.SubElement(w, "refs", nrefs="")
+                        existing = ref_node.get('nrefs').split()
+                        ref_node.set('nrefs', " ".join(sorted(list(set(existing + origin_refs)))))
 
-    # Finaliza e formata o XML
     xml_str = ET.tostring(root, encoding='utf-8')
     return minidom.parseString(xml_str).toprettyxml(indent="    ")
 
-# Interface Streamlit
-st.title("🏛️ Conversor Alpheios ➔ Perseids (V8 Definitiva)")
-st.write("Suba o arquivo .json original (o mesmo que deu erro antes).")
-
-file = st.file_uploader("Arquivo JSON", type="json")
+# Streamlit UI
+st.title("Conversor Alpheios ➔ Perseids")
+file = st.file_uploader("Suba o JSON original do Alpheios", type="json")
 
 if file:
     try:
         content = json.load(file)
-        # Tenta a conversão
-        xml_output = convert_to_xml(content)
-        
-        if xml_output:
-            st.success("Conversão concluída!")
-            st.code(xml_output, language="xml")
-            st.download_button("Baixar XML para Perseids", xml_output, file_name="alinhamento.xml")
+        xml_result = convert_to_xml(content)
+        if xml_result:
+            st.success("Conversão bem-sucedida!")
+            st.code(xml_result, language="xml")
+            st.download_button("Baixar XML", xml_result, file_name="alinhamento.xml")
         else:
-            st.error("Erro: Não foi possível mapear as palavras. O arquivo pode estar vazio ou em um formato incompatível.")
+            st.error("Erro ao mapear tokens. O formato interno do JSON é diferente do esperado.")
     except Exception as e:
-        st.error(f"Erro inesperado: {e}")
+        st.error(f"Erro no processamento: {e}")
