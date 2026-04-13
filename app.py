@@ -5,30 +5,25 @@ from xml.dom import minidom
 
 st.set_page_config(page_title="Conversor Alpheios Final", layout="wide")
 
-def get_tokens_from_alpheios(data_part):
+def extrair_tokens_recursivo(obj):
     """
-    Busca os tokens no caminho específico: 
-    data -> alignedText -> segments -> tokens
-    Ou data -> segments -> tokens
+    Varre o JSON procurando por listas de tokens.
+    Funciona para estruturas com ou sem 'alignedText'.
     """
-    # 1. Tenta acessar via alignedText (comum nos seus arquivos recentes)
-    container = data_part.get('alignedText', data_part)
-    
-    # 2. Pega a lista de segmentos
-    segments = container.get('segments', [])
-    if isinstance(segments, dict): segments = [segments]
-    
-    all_tokens = []
-    for seg in segments:
-        tokens = seg.get('tokens', [])
-        if isinstance(tokens, list):
-            for t in tokens:
-                # O Alpheios usa 'idWord' como identificador único nos seus JSONs
+    tokens_encontrados = []
+    if isinstance(obj, dict):
+        if "tokens" in obj and isinstance(obj["tokens"], list):
+            for t in obj["tokens"]:
                 tid = t.get('idWord') or t.get('id')
                 word = t.get('word')
                 if tid and word is not None:
-                    all_tokens.append({'id': tid, 'word': word})
-    return all_tokens
+                    tokens_encontrados.append({'id': tid, 'word': word})
+        for v in obj.values():
+            tokens_encontrados.extend(extrair_tokens_recursivo(v))
+    elif isinstance(obj, list):
+        for item in obj:
+            tokens_encontrados.extend(extrair_tokens_recursivo(item))
+    return tokens_encontrados
 
 def convert_to_xml(json_data):
     root = ET.Element("aligned-text", xmlns="http://alpheios.net/namespaces/aligned-text")
@@ -36,16 +31,16 @@ def convert_to_xml(json_data):
     ET.SubElement(root, "language", lnum="L2", **{"xml:lang": "por"})
     
     sentence_node = ET.SubElement(root, "sentence", n="1")
-    id_map = {} # De '1-0-1' para '1-1'
+    id_map = {} # Mapeia ID original (ex: 1-0-1) para ID XML (ex: 1-1)
 
-    # Localizar origin e target
-    origin_part = json_data.get('origin', {})
-    target_part = json_data.get('target', {})
-
-    def process_lang(lang_data, lnum):
-        tokens = get_tokens_from_alpheios(lang_data)
-        if not tokens: return False
+    # 1. Processar Origem e Destino
+    def processar(chave, lnum):
+        dados_lingua = json_data.get(chave, {})
+        tokens = extrair_tokens_recursivo(dados_lingua)
         
+        if not tokens:
+            return False
+            
         wds_node = ET.SubElement(sentence_node, "wds", lnum=lnum)
         for i, tok in enumerate(tokens, 1):
             xml_id = f"1-{i}"
@@ -56,60 +51,60 @@ def convert_to_xml(json_data):
             text_node.text = str(tok['word'])
         return True
 
-    # 1. Extrair Textos
-    if not process_lang(origin_part, 'L1') or not process_lang(target_part, 'L2'):
+    # Executa a extração
+    ok_l1 = processar('origin', 'L1')
+    ok_l2 = processar('target', 'L2')
+
+    if not ok_l1 or not ok_l2:
         return None
 
-    # 2. Mapear Alinhamentos (Refs)
-    # A seção 'alignments' costuma estar na raiz do JSON
-    for al in json_data.get('alignments', []):
+    # 2. Processar Alinhamentos (Ações)
+    alignments = json_data.get('alignments', [])
+    for al in alignments:
         actions = al.get('actions', {})
-        origins = actions.get('origin', [])
-        targets = actions.get('target', [])
+        orig_ids = actions.get('origin', [])
+        targ_ids = actions.get('target', [])
         
-        # Para cada palavra de origem, adiciona as referências de destino
-        for o_id in origins:
-            if o_id in id_map:
-                xml_o = id_map[o_id]
-                # Busca o nó <w> correspondente no XML
-                for w in sentence_node.findall(f".//w[@n='{xml_o}']"):
-                    refs = w.find('refs')
-                    if refs is None: refs = ET.SubElement(w, "refs", nrefs="")
+        # Mapeia IDs para ambos os lados
+        todos_ids = orig_ids + targ_ids
+        for source_id in todos_ids:
+            if source_id in id_map:
+                xml_id_ref = id_map[source_id]
+                # Encontra o nó <w> no XML gerado
+                for w in sentence_node.findall(f".//w[@n='{xml_id_ref}']"):
+                    refs_node = w.find('refs')
+                    if refs_node is None:
+                        refs_node = ET.SubElement(w, "refs", nrefs="")
                     
-                    # Atualiza a lista de nrefs
-                    existing = refs.get('nrefs').split()
-                    to_add = [id_map[t] for t in targets if t in id_map]
-                    refs.set('nrefs', " ".join(sorted(list(set(existing + to_add)))))
-
-        # Faz o inverso (Português para Grego)
-        for t_id in targets:
-            if t_id in id_map:
-                xml_t = id_map[t_id]
-                for w in sentence_node.findall(f".//w[@n='{xml_t}']"):
-                    refs = w.find('refs')
-                    if refs is None: refs = ET.SubElement(w, "refs", nrefs="")
-                    existing = refs.get('nrefs').split()
-                    to_add = [id_map[o] for o in origins if o in id_map]
-                    refs.set('nrefs', " ".join(sorted(list(set(existing + to_add)))))
+                    # Determina quem são os alvos (se eu sou origin, meus alvos são target e vice-versa)
+                    targets = targ_ids if source_id in orig_ids else orig_ids
+                    
+                    current_refs = refs_node.get('nrefs').split()
+                    new_refs = [id_map[tid] for tid in targets if tid in id_map]
+                    
+                    # Atualiza sem duplicatas
+                    final_refs = sorted(list(set(current_refs + new_refs)))
+                    refs_node.set('nrefs', " ".join(final_refs))
 
     xml_str = ET.tostring(root, encoding='utf-8')
     return minidom.parseString(xml_str).toprettyxml(indent="    ")
 
-# Interface Streamlit
-st.title("🏛️ Conversor Alpheios ➔ Perseids (Correção idWord)")
+# --- Interface Streamlit ---
+st.title("🏛️ Conversor Alpheios ➔ Perseids (V7 - Ultra)")
 
-file = st.file_uploader("Suba o JSON (DL-Plat ou Fabula)", type="json")
+uploaded_file = st.file_uploader("Suba seu arquivo JSON", type="json")
 
-if file:
+if uploaded_file:
     try:
-        content = json.load(file)
-        result = convert_to_xml(content)
+        content = json.load(uploaded_file)
+        # Tenta converter
+        xml_result = convert_to_xml(content)
         
-        if result:
-            st.success("Sucesso! Texto e alinhamentos encontrados.")
-            st.code(result, language="xml")
-            st.download_button("Baixar XML", result, file_name="alinhamento.xml")
+        if xml_result:
+            st.success("Conversão realizada com sucesso!")
+            st.code(xml_result, language="xml")
+            st.download_button("Baixar XML", xml_result, file_name="alinhamento_perseids.xml")
         else:
-            st.error("Erro: Não foi possível encontrar os tokens. Verifique se o JSON possui a chave 'alignedText'.")
+            st.error("Erro: Não foi possível localizar os tokens de texto no arquivo. Verifique se as chaves 'origin' e 'target' contêm dados.")
     except Exception as e:
-        st.error(f"Erro inesperado: {e}")
+        st.error(f"Erro ao processar: {e}")
