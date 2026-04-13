@@ -8,22 +8,18 @@ st.set_page_config(page_title="Conversor Alpheios para Perseids", layout="wide")
 def convert_alpheios_to_perseids(json_content):
     data = json.loads(json_content)
     
-    # Criar a raiz com o namespace correto do Alpheios/Perseids
     root = ET.Element("aligned-text", xmlns="http://alpheios.net/namespaces/aligned-text")
     ET.SubElement(root, "language", lnum="L1", **{"xml:lang": "grc"})
     ET.SubElement(root, "language", lnum="L2", **{"xml:lang": "por"})
     
-    # No seu JSON, os dados estão em alignedText -> sections
-    section = data['alignedText']['sections'][0]
-    
-    # Mapeamento global de IDs do JSON (ex: 1-0-1) para IDs do XML (ex: 1-1)
     id_map = {}
-    
-    # Função para extrair tokens e criar estrutura XML
+    sentence_node = ET.SubElement(root, "sentence", n="1")
+
+    # Função para extrair tokens baseada na estrutura real do seu JSON
     def build_sentence(parent, lang_data, lnum, sentence_n):
         wds = ET.SubElement(parent, "wds", lnum=lnum)
-        # O Alpheios JSON pode ter múltiplos segmentos, vamos achatar para uma sentença no Perseids
         token_count = 1
+        # No seu JSON, a estrutura é data['origin']['segments']...
         for segment in lang_data['segments']:
             for token in segment['tokens']:
                 xml_id = f"{sentence_n}-{token_count}"
@@ -34,17 +30,17 @@ def convert_alpheios_to_perseids(json_content):
                 text_node.text = token['word']
                 token_count += 1
 
-    # Criar a sentença única (ou iterar se houver divisão clara no JSON)
-    sentence_node = ET.SubElement(root, "sentence", n="1")
-    build_sentence(sentence_node, section['origin'], "L1", "1")
-    build_sentence(sentence_node, section['target'], "L2", "1")
+    # Chamada corrigida acessando 'origin' e 'target' diretamente na raiz
+    build_sentence(sentence_node, data['origin'], "L1", "1")
+    build_sentence(sentence_node, data['target'], "L2", "1")
 
     # Mapear Alinhamentos
-    # Criamos um dicionário para armazenar quais IDs de destino cada ID de origem possui
     align_refs = {}
     for alignment in data.get('alignments', []):
-        origins = alignment['actions']['origin']
-        targets = alignment['actions']['target']
+        # No seu JSON, o caminho é alignment['actions']['origin']
+        actions = alignment.get('actions', {})
+        origins = actions.get('origin', [])
+        targets = actions.get('target', [])
         
         for o in origins:
             if o not in align_refs: align_refs[o] = []
@@ -54,17 +50,15 @@ def convert_alpheios_to_perseids(json_content):
             if t not in align_refs: align_refs[t] = []
             align_refs[t].extend([id_map[o] for o in origins if o in id_map])
 
-    # Inserir as tags <refs> nos nós <w> criados
+    # Inserir as tags <refs>
     for w_node in sentence_node.findall(".//w"):
         xml_id = w_node.get('n')
-        # Encontrar qual ID original do JSON corresponde a este xml_id
         orig_json_id = [k for k, v in id_map.items() if v == xml_id]
         if orig_json_id and orig_json_id[0] in align_refs:
             refs = sorted(list(set(align_refs[orig_json_id[0]])))
             if refs:
                 ET.SubElement(w_node, "refs", nrefs=" ".join(refs))
 
-    # Retornar XML formatado
     xml_str = ET.tostring(root, encoding='utf-8')
     return minidom.parseString(xml_str).toprettyxml(indent="    ")
 
