@@ -70,7 +70,7 @@ def convert_alpheios_to_perseids(json_content):
 
 # Interface do Usuário
 st.title("🏛️ Conversor de Alinhamento JSON ➔ XML")
-st.subheader("Formato: Alpheios Editor para Perseids/Arethusa")
+st.subheader("Formato: Novo Alpheios Editor para Perseids/Alpheios")
 
 uploaded_file = st.file_uploader("Suba o arquivo .json gerado pelo Alpheios", type="json")
 
